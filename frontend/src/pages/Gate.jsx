@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 
 export default function Gate() {
-  const [today, setToday] = useState(null);
+  const [pre, setPre] = useState(null);
   const [rows, setRows] = useState([]);
   const [msg, setMsg] = useState("");
 
   async function load() {
-    const [t, list] = await Promise.all([api.日闸今日(), api.日闸列表()]);
-    setToday(t);
+    const [p, list] = await Promise.all([api.日闸今日(), api.日闸列表()]);
+    setPre(p);
     setRows(list);
   }
 
@@ -24,6 +24,7 @@ export default function Gate() {
       await load();
     } catch (e) {
       setMsg(e.message);
+      await load().catch(() => {});
     }
   }
 
@@ -33,17 +34,28 @@ export default function Gate() {
       <p className="msg">{msg}</p>
       <div className="row">
         <div className="metric">
-          <b>{today?.day || "—"}</b>
+          <b>{pre?.day || "—"}</b>
           <span>今日</span>
         </div>
         <div className="metric">
-          <b>{today?.状态 || "—"}</b>
+          <b>{pre?.状态 || "—"}</b>
           <span>日闸状态</span>
         </div>
-        <button type="button" onClick={seal} disabled={today?.sealed}>
+        <div className="metric">
+          <b>{pre?.超期待扫数 ?? "—"}</b>
+          <span>超期待扫</span>
+        </div>
+        <div className="metric">
+          <b>{pre?.今日扫描?.quarantined ?? "—"}</b>
+          <span>今日扫描隔离</span>
+        </div>
+        <button type="button" onClick={seal} disabled={pre?.sealed || pre?.可结案 === false}>
           今日结案
         </button>
       </div>
+      <p className={`msg ${pre?.可结案 ? "ok" : ""}`}>
+        预检：{pre?.可结案 ? "通过" : (pre?.阻塞原因 || []).join("；") || "—"}
+      </p>
       <table>
         <thead>
           <tr>

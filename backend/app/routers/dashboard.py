@@ -22,6 +22,15 @@ def dashboard():
         wm = conn.execute(
             "SELECT value FROM watermarks WHERE key='在途票'"
         ).fetchone()
+        overdue = conn.execute(
+            """SELECT COUNT(*) AS c FROM hang_tickets
+               WHERE status='待取' AND due_date <> '' AND due_date < ?""",
+            (day,),
+        ).fetchone()["c"]
+        scan = conn.execute(
+            "SELECT * FROM overdue_scans WHERE day=? ORDER BY id DESC LIMIT 1",
+            (day,),
+        ).fetchone()
         return {
             "今日": day,
             "日闸": "已结案" if gate and gate["sealed"] else "开放",
@@ -34,6 +43,9 @@ def dashboard():
             "已取": cnt("已取"),
             "超期隔离": cnt("超期隔离"),
             "丢失隔离": cnt("丢失隔离"),
+            "超期待取数": overdue,
+            "今日扫描": dict(scan) if scan else None,
+            "今日扫描已跑": bool(scan and scan["finished_at"]),
         }
     finally:
         conn.close()

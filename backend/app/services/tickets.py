@@ -5,7 +5,12 @@ from datetime import datetime
 from fastapi import HTTPException
 
 from app.db import FORWARD, connect, transaction
-from app.services.gate import ensure_day_row, is_day_sealed, refresh_in_flight, today_str
+from app.services.gate import (
+    ensure_day_row,
+    refresh_in_flight,
+    sealed_in,
+    today_str,
+)
 
 
 def list_tickets(status: str | None = None, store_code: str | None = None) -> list[dict]:
@@ -29,6 +34,12 @@ def list_tickets(status: str | None = None, store_code: str | None = None) -> li
                     (r["ticket_no"],),
                 ).fetchall()
             ]
+            q = conn.execute(
+                """SELECT * FROM quarantines WHERE ticket_no=?
+                   ORDER BY id DESC LIMIT 1""",
+                (r["ticket_no"],),
+            ).fetchone()
+            r["quarantine"] = dict(q) if q else None
         return rows
     finally:
         conn.close()
@@ -57,14 +68,19 @@ def get_ticket(ticket_no: str) -> dict:
                 (ticket_no,),
             ).fetchall()
         ]
+        data["quarantines"] = [
+            dict(q)
+            for q in conn.execute(
+                "SELECT * FROM quarantines WHERE ticket_no=? ORDER BY id",
+                (ticket_no,),
+            ).fetchall()
+        ]
         return data
     finally:
         conn.close()
 
 
 def create_ticket(payload: dict) -> dict:
-    if is_day_sealed():
-        raise HTTPException(409, "今日已结案，禁止新开挂牌")
     ticket_no = (payload.get("ticket_no") or "").strip()
     store_code = (payload.get("store_code") or "").strip()
     pickup_code = (payload.get("pickup_code") or "").strip()
@@ -80,6 +96,8 @@ def create_ticket(payload: dict) -> dict:
     now = datetime.now().replace(microsecond=0).isoformat(sep=" ")
     with transaction() as conn:
         ensure_day_row(conn)
+        if sealed_in(conn, today_str()):
+            raise HTTPException(409, "今日已结案，禁止新开挂牌")
         store = conn.execute(
             "SELECT * FROM stores WHERE code=? AND active=1", (store_code,)
         ).fetchone()
@@ -115,11 +133,11 @@ def create_ticket(payload: dict) -> dict:
 
 
 def advance(ticket_no: str, to_status: str, operator: str = "店员", note: str = "") -> dict:
-    if is_day_sealed():
-        raise HTTPException(409, "今日已结案，禁止改工序")
     to_status = (to_status or "").strip()
     with transaction() as conn:
         ensure_day_row(conn)
+        if sealed_in(conn, today_str()):
+            raise HTTPException(409, "今日已结案，禁止改工序")
         row = conn.execute(
             "SELECT * FROM hang_tickets WHERE ticket_no=?", (ticket_no,)
         ).fetchone()
@@ -146,10 +164,11 @@ def advance(ticket_no: str, to_status: str, operator: str = "店员", note: str 
 
 
 def pickup(ticket_no: str, pickup_code: str, operator: str = "店员") -> dict:
-    if is_day_sealed():
-        raise HTTPException(409, "今日已结案，禁止取衣核销")
+    """取衣核销与到点扫描在同一把事务锁上争用：谁先看到「待取」谁落定。"""
     with transaction() as conn:
         ensure_day_row(conn)
+        if sealed_in(conn, today_str()):
+            raise HTTPException(409, "今日已结案，禁止取衣核销")
         row = conn.execute(
             "SELECT * FROM hang_tickets WHERE ticket_no=?", (ticket_no,)
         ).fetchone()
@@ -160,10 +179,13 @@ def pickup(ticket_no: str, pickup_code: str, operator: str = "店员") -> dict:
         if (pickup_code or "").strip() != row["pickup_code"]:
             raise HTTPException(403, "取衣暗码不符")
         now = datetime.now().replace(microsecond=0).isoformat(sep=" ")
-        conn.execute(
-            "UPDATE hang_tickets SET status='已取', closed_at=? WHERE ticket_no=?",
+        cur = conn.execute(
+            """UPDATE hang_tickets SET status='已取', closed_at=?
+               WHERE ticket_no=? AND status='待取'""",
             (now, ticket_no),
         )
+        if cur.rowcount == 0:
+            raise HTTPException(409, "取衣核销争用失败，挂牌状态已改变，请刷新")
         conn.execute(
             """INSERT INTO pickups(ticket_no, pickup_code, picked_at, operator)
                VALUES (?,?,?,?)""",
@@ -179,9 +201,15 @@ def pickup(ticket_no: str, pickup_code: str, operator: str = "店员") -> dict:
 
 
 def quarantine(ticket_no: str, kind: str, reason: str, operator: str = "店员") -> dict:
+    """仅保留人工「丢失隔离」。超期进隔离的唯一权威是到点扫描。"""
     kind = (kind or "").strip()
     if kind not in ("超期隔离", "丢失隔离"):
         raise HTTPException(400, "隔离种类仅超期隔离或丢失隔离")
+    if kind == "超期隔离":
+        raise HTTPException(
+            409,
+            "超期进隔离只能由「超期扫描」到点落定；请到超期隔离页运行扫描后查看流水",
+        )
     with transaction() as conn:
         row = conn.execute(
             "SELECT * FROM hang_tickets WHERE ticket_no=?", (ticket_no,)
@@ -190,18 +218,20 @@ def quarantine(ticket_no: str, kind: str, reason: str, operator: str = "店员")
             raise HTTPException(404, "挂牌不存在")
         if row["status"] in ("已取", "丢失隔离"):
             raise HTTPException(409, f"当前态「{row['status']}」不可隔离")
-        if kind == "超期隔离" and row["status"] not in ("待取", "超期隔离"):
-            raise HTTPException(409, "超期隔离仅从待取进入")
         now = datetime.now().replace(microsecond=0).isoformat(sep=" ")
         prev = row["status"]
-        conn.execute(
-            "UPDATE hang_tickets SET status=? WHERE ticket_no=?",
-            (kind, ticket_no),
+        cur = conn.execute(
+            "UPDATE hang_tickets SET status=? WHERE ticket_no=? AND status=?",
+            (kind, ticket_no, prev),
         )
+        if cur.rowcount == 0:
+            raise HTTPException(409, "隔离争用失败，挂牌状态已改变，请刷新")
         conn.execute(
-            """INSERT INTO quarantines(ticket_no, kind, reason, created_at, resolved)
-               VALUES (?,?,?,?,0)""",
-            (ticket_no, kind, reason or kind, now),
+            """INSERT INTO quarantines
+               (ticket_no, kind, reason, created_at, resolved,
+                source, scan_id, from_status, due_date, operator)
+               VALUES (?,?,?,?,0,'人工',NULL,?,?,?)""",
+            (ticket_no, kind, reason or kind, now, prev, row["due_date"], operator or "店员"),
         )
         conn.execute(
             """INSERT INTO process_events(ticket_no, from_status, to_status, operator, occurred_at, note)

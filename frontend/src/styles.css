@@ -317,6 +317,13 @@ th {
   color: #9fd6bd;
 }
 
+.hint {
+  margin: -4px 0 14px;
+  color: var(--steam);
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
 @keyframes pin-pulse {
   0%,
   100% {

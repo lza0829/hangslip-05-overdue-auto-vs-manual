@@ -16,12 +16,14 @@ export default function Home() {
     ? [
         ["在途水位", d.在途水位],
         ["待取", d.待取],
+        ["超期待扫", d.超期待取数],
         ["超期隔离", d.超期隔离],
         ["今日已取", d.已取],
-        ["水洗中", d.水洗],
         ["日闸", d.日闸],
       ]
     : [];
+
+  const scan = d?.今日扫描;
 
   return (
     <>
@@ -29,7 +31,7 @@ export default function Home() {
         <section className="ticket-hero">
           <h2>今日挂衣</h2>
           <p>
-            票墙左侧是工位入口。先开票贴号，再沿工序推到待取，顾客凭暗码核销；逾承诺日可进超期隔离，与现行票态互证。
+            票墙左侧是工位入口。先开票贴号，再沿工序推到待取，顾客凭暗码核销；逾承诺日仍待取的票由到点扫描统一改入超期隔离，隔离流水与待取页、水位同源重放。
           </p>
         </section>
         <div className="metrics">
@@ -42,6 +44,19 @@ export default function Home() {
         </div>
       </div>
       <div className="msg">{err}</div>
+      {d && (
+        <section className="panel">
+          <h3>今日超期扫描</h3>
+          <p className={`msg ${d.今日扫描已跑 ? "ok" : ""}`}>
+            {scan
+              ? `扫描 #${scan.id} · ${scan.finished_at ? "已完成" : "进行中"} · 核对 ${scan.scanned} · 隔离 ${scan.quarantined} · 跳过 ${scan.skipped}`
+              : "今日尚未运行扫描。"}
+          </p>
+          <p className="hint">
+            待扫超期票 {d.超期待取数} 张。超期进隔离只认扫描落定；扫描落定后待取页不再展示、总览超期数归零，日闸预检才放行结案。
+          </p>
+        </section>
+      )}
       {d && (
         <section className="panel">
           <h3>工序分布</h3>

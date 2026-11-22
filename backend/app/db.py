@@ -54,7 +54,12 @@ CREATE TABLE IF NOT EXISTS quarantines (
   kind TEXT NOT NULL,
   reason TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  resolved INTEGER NOT NULL DEFAULT 0
+  resolved INTEGER NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT '人工',
+  scan_id INTEGER,
+  from_status TEXT,
+  due_date TEXT,
+  operator TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS day_gates (
   day TEXT PRIMARY KEY,
@@ -71,6 +76,35 @@ CREATE TABLE IF NOT EXISTS watermarks (
   value INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS overdue_scans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  day TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  operator TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT '',
+  scanned INTEGER NOT NULL DEFAULT 0,
+  quarantined INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  in_flight_before INTEGER NOT NULL DEFAULT 0,
+  in_flight_after INTEGER NOT NULL DEFAULT 0,
+  ready_before INTEGER NOT NULL DEFAULT 0,
+  ready_after INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS scan_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_id INTEGER NOT NULL,
+  ticket_no TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  observed_status TEXT NOT NULL,
+  due_date TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_scan_items_scan ON scan_items(scan_id);
+CREATE INDEX IF NOT EXISTS idx_quarantines_ticket ON quarantines(ticket_no);
+CREATE INDEX IF NOT EXISTS idx_quarantines_scan ON quarantines(scan_id);
+CREATE INDEX IF NOT EXISTS idx_tickets_status_due ON hang_tickets(status, due_date);
 """
 
 STATUSES = ("已收", "水洗", "烘干", "熨烫", "待取", "已取", "超期隔离", "丢失隔离")
@@ -80,6 +114,17 @@ FORWARD = {
     "烘干": ("熨烫", "待取"),
     "熨烫": ("待取",),
     "待取": (),
+}
+
+# 仅用于从旧库补充新列；新库由 SCHEMA 建全。
+COLUMN_MIGRATIONS = {
+    "quarantines": (
+        ("source", "TEXT NOT NULL DEFAULT '人工'"),
+        ("scan_id", "INTEGER"),
+        ("from_status", "TEXT"),
+        ("due_date", "TEXT"),
+        ("operator", "TEXT NOT NULL DEFAULT ''"),
+    ),
 }
 
 
@@ -106,10 +151,21 @@ def transaction():
         conn.close()
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in COLUMN_MIGRATIONS.items():
+        existing = {
+            r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, ddl in columns:
+            if name not in existing:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
 def init_db() -> None:
     conn = connect()
     try:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         conn.commit()
     finally:
         conn.close()
